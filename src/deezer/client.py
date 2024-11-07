@@ -27,6 +27,11 @@ from deezer.resources import (
     User,
 )
 
+from deezer import apicache
+import logging
+
+LOGGER = logging.getLogger(__name__)
+
 
 class Client(httpx.Client):
     """
@@ -71,11 +76,13 @@ class Client(httpx.Client):
         self,
         access_token: str | None = None,
         headers: HeaderTypes | None = None,
+        cache: apicache.CacheInterface | None = None
     ):
         if access_token:
             deezer_auth = DeezerQueryAuth(access_token=access_token)
         else:
             deezer_auth = None
+        self.cache = cache
         super().__init__(
             base_url="https://api.deezer.com",
             auth=deezer_auth,
@@ -152,20 +159,32 @@ class Client(httpx.Client):
         :param resource_id: The resource id to use as top level.
         :param paginate_list: Whether to wrap list into a pagination object.
         """
-        response = super().request(
-            method,
-            path,
-            **kwargs,
-        )
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise DeezerHTTPError.from_http_error(exc) from exc
-        json_data = response.json()
-        if not isinstance(json_data, dict):
-            return json_data
-        if json_data.get("error"):
-            raise DeezerErrorResponse(json_data)
+
+        should_cache = self.cache is not None
+        cache_key = [method, path, resource_id]
+        if should_cache and self.cache.has(cache_key):
+            LOGGER.debug(f"Cache HIT: {path}")
+            json_data = self.cache.get(cache_key)
+        else:
+            if should_cache:
+                LOGGER.debug(f"Cache MISS: {path}")
+            response = super().request(
+                method,
+                path,
+                **kwargs,
+            )
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise DeezerHTTPError.from_http_error(exc) from exc
+            json_data = response.json()
+            if should_cache:
+                LOGGER.debug(f"Cache WRITE: {path}")
+                self.cache.set_item(cache_key, json_data, 3600 * 12)
+            if not isinstance(json_data, dict):
+                return json_data
+            if json_data.get("error"):
+                raise DeezerErrorResponse(json_data)
         return self._process_json(
             json_data,
             parent=parent,
